@@ -4,8 +4,8 @@ using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Text;
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
-using System.Threading;
 
 namespace TestHelper
 {
@@ -15,16 +15,14 @@ namespace TestHelper
     /// </summary>
     public abstract partial class DiagnosticVerifier
     {
-        private static readonly MetadataReference CorlibReference = new MetadataFileReference(typeof(object).Assembly.Location, MetadataImageKind.Assembly);
-        private static readonly MetadataReference SystemCoreReference = new MetadataFileReference(typeof(Enumerable).Assembly.Location, MetadataImageKind.Assembly);
-        private static readonly MetadataReference CSharpSymbolsReference = new MetadataFileReference(typeof(CSharpCompilation).Assembly.Location, MetadataImageKind.Assembly);
-        private static readonly MetadataReference CodeAnalysisReference = new MetadataFileReference(typeof(Compilation).Assembly.Location, MetadataImageKind.Assembly);
+        private static readonly MetadataReference CorlibReference = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
+        private static readonly MetadataReference SystemCoreReference = MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location);
+        private static readonly MetadataReference CSharpSymbolsReference = MetadataReference.CreateFromFile(typeof(CSharpCompilation).Assembly.Location);
+        private static readonly MetadataReference CodeAnalysisReference = MetadataReference.CreateFromFile(typeof(Compilation).Assembly.Location);
 
         internal static string DefaultFilePathPrefix = "Test";
         internal static string CSharpDefaultFileExt = "cs";
         internal static string VisualBasicDefaultExt = "vb";
-        internal static string CSharpDefaultFilePath = DefaultFilePathPrefix + 0 + "." + CSharpDefaultFileExt;
-        internal static string VisualBasicDefaultFilePath = DefaultFilePathPrefix + 0 + "." + VisualBasicDefaultExt;
         internal static string TestProjectName = "TestProject";
 
         #region  Get Diagnostics
@@ -33,10 +31,10 @@ namespace TestHelper
         /// Given classes in the form of strings, their language, and an IDiagnosticAnlayzer to apply to it, return the diagnostics found in the string after converting it to a document.
         /// </summary>
         /// <param name="sources">Classes in the form of strings</param>
-        /// <param name="language">The language the soruce classes are in</param>
+        /// <param name="language">The language the source classes are in</param>
         /// <param name="analyzer">The analyzer to be run on the sources</param>
-        /// <returns>An IEnumerable of Diagnostics that surfaced in teh source code, sorted by Location</returns>
-        private static Diagnostic[] GetSortedDiagnostics(string[] sources, string language, IDiagnosticAnalyzer analyzer)
+        /// <returns>An IEnumerable of Diagnostics that surfaced in the source code, sorted by Location</returns>
+        private static Diagnostic[] GetSortedDiagnostics(string[] sources, string language, DiagnosticAnalyzer analyzer)
         {
             return GetSortedDiagnosticsFromDocuments(analyzer, GetDocuments(sources, language));
         }
@@ -47,9 +45,8 @@ namespace TestHelper
         /// </summary>
         /// <param name="analyzer">The analyzer to run on the documents</param>
         /// <param name="documents">The Documents that the analyzer will be run on</param>
-        /// <param name="spans">Optional TextSpan indicating where a Diagnostic will be found</param>
-        /// <returns>An IEnumerable of Diagnostics that surfaced in teh source code, sorted by Location</returns>
-        protected static Diagnostic[] GetSortedDiagnosticsFromDocuments(IDiagnosticAnalyzer analyzer, Document[] documents)
+        /// <returns>An IEnumerable of Diagnostics that surfaced in the source code, sorted by Location</returns>
+        protected static Diagnostic[] GetSortedDiagnosticsFromDocuments(DiagnosticAnalyzer analyzer, Document[] documents)
         {
             var projects = new HashSet<Project>();
             foreach (var document in documents)
@@ -60,8 +57,8 @@ namespace TestHelper
             var diagnostics = new List<Diagnostic>();
             foreach (var project in projects)
             {
-                var compilation = project.GetCompilationAsync().Result;
-                var diags = AnalyzerDriver.GetDiagnostics(compilation, new[] { analyzer }, null, CancellationToken.None);
+                var compilationWithAnalyzers = project.GetCompilationAsync().Result.WithAnalyzers(ImmutableArray.Create(analyzer));
+                var diags = compilationWithAnalyzers.GetAnalyzerDiagnosticsAsync().Result;
                 foreach (var diag in diags)
                 {
                     if (diag.Location == Location.None || diag.Location.IsInMetadata)
@@ -89,7 +86,7 @@ namespace TestHelper
         }
 
         /// <summary>
-        /// Sort diagnostices by location in source document
+        /// Sort diagnostics by location in source document
         /// </summary>
         /// <param name="diagnostics">The list of Diagnostics to be sorted</param>
         /// <returns>An IEnumerable containing the Diagnostics in order of Location</returns>
@@ -102,21 +99,16 @@ namespace TestHelper
 
         #region Set up compilation and documents
         /// <summary>
-        /// Given an array of strings as soruces and a language, turn them into a project and return the documents and spans of it.
+        /// Given an array of strings as sources and a language, turn them into a project and return the documents and spans of it.
         /// </summary>
         /// <param name="sources">Classes in the form of strings</param>
         /// <param name="language">The language the source code is in</param>
-        /// <returns>A Tuple containing the Documents produced from the sources and thier TextSpans if relevant</returns>
+        /// <returns>A Tuple containing the Documents produced from the sources and their TextSpans if relevant</returns>
         private static Document[] GetDocuments(string[] sources, string language)
         {
             if (language != LanguageNames.CSharp && language != LanguageNames.VisualBasic)
             {
                 throw new ArgumentException("Unsupported Language");
-            }
-
-            for (int i = 0; i < sources.Length; i++)
-            {
-                string fileName = language == LanguageNames.CSharp ? "Test" + i + ".cs" : "Test" + i + ".vb";
             }
 
             var project = CreateProject(sources, language);
@@ -146,7 +138,7 @@ namespace TestHelper
         /// </summary>
         /// <param name="sources">Classes in the form of strings</param>
         /// <param name="language">The language the source code is in</param>
-        /// <returns>A Project created out of the Douments created from the source strings</returns>
+        /// <returns>A Project created out of the Documents created from the source strings</returns>
         private static Project CreateProject(string[] sources, string language = LanguageNames.CSharp)
         {
             string fileNamePrefix = DefaultFilePathPrefix;
@@ -154,7 +146,7 @@ namespace TestHelper
 
             var projectId = ProjectId.CreateNewId(debugName: TestProjectName);
 
-            var solution = new CustomWorkspace()
+            var solution = new AdhocWorkspace()
                 .CurrentSolution
                 .AddProject(projectId, TestProjectName, TestProjectName, language)
                 .AddMetadataReference(projectId, CorlibReference)

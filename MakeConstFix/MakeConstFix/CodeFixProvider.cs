@@ -1,4 +1,7 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Composition;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,32 +15,44 @@ using Microsoft.CodeAnalysis.Text;
 using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Formatting;
 
-namespace DiagnosticAndCodeFix
+namespace MakeConstFix
 {
-    [ExportCodeFixProvider(DiagnosticAnalyzer.DiagnosticId, LanguageNames.CSharp)]
-    public class CodeFixProvider : ICodeFixProvider
+    [ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(MakeConstFixCodeFixProvider)), Shared]
+    public class MakeConstFixCodeFixProvider : CodeFixProvider
     {
-        public IEnumerable<string> GetFixableDiagnosticIds()
+        private const string title = "定数化";
+
+        public sealed override ImmutableArray<string> FixableDiagnosticIds
         {
-            return new[] { DiagnosticAnalyzer.DiagnosticId };
+            get { return ImmutableArray.Create(MakeConstFixAnalyzer.MakeConstDiagnosticId); }
         }
 
-        public async Task<IEnumerable<CodeAction>> GetFixesAsync(Document document, TextSpan span, IEnumerable<Diagnostic> diagnostics, CancellationToken cancellationToken)
+        public sealed override FixAllProvider GetFixAllProvider()
         {
-            var root = await document.GetSyntaxRootAsync(cancellationToken).ConfigureAwait(false);
-
-            var diagnosticSpan = diagnostics.First().Location.SourceSpan;
-
-            var declaration = root.FindToken(diagnosticSpan.Start).Parent.AncestorsAndSelf()
-                .OfType<LocalDeclarationStatementSyntax>().First();
-
-            // 定数化する、というFixをActionを作成
-            return new[] { CodeAction.Create("Make constant", c => MakeConstAsync(document, declaration, c)) };
+            return WellKnownFixAllProviders.BatchFixer;
         }
 
-        private async Task<Document> MakeConstAsync(Document document,
-            LocalDeclarationStatementSyntax localDeclaration,
-            CancellationToken cancellationToken)
+        public sealed override async Task RegisterCodeFixesAsync(CodeFixContext context)
+        {
+            var root = await context.Document.GetSyntaxRootAsync(context.CancellationToken).ConfigureAwait(false);
+
+            // Fixを行うコードの部分を取得
+            var diagnostic = context.Diagnostics.First();
+            var diagnosticSpan = diagnostic.Location.SourceSpan;
+
+            // 修正可能な宣言文を検索
+            var declaration = root.FindToken(diagnosticSpan.Start).Parent.AncestorsAndSelf().OfType<LocalDeclarationStatementSyntax>().First();
+
+            // 定数化を行うCodeFixを作成する
+            context.RegisterCodeFix(
+                CodeAction.Create(
+                    title: title,
+                    createChangedDocument: c => MakeConstAsync(context.Document, declaration, c),
+                    equivalenceKey: title),
+                diagnostic);
+        }
+
+        private async Task<Document> MakeConstAsync(Document document, LocalDeclarationStatementSyntax localDeclaration, CancellationToken cancellationToken)
         {
             // 宣言文から前方のTrivia（空白など）を削除する
             var firstToken = localDeclaration.GetFirstToken();
@@ -46,8 +61,7 @@ namespace DiagnosticAndCodeFix
                 firstToken, firstToken.WithLeadingTrivia(SyntaxTriviaList.Empty));
 
             // 前方のTriviaがあるconstトークンを作成する
-            var constToken = SyntaxFactory.Token(leadingTrivia, SyntaxKind.ConstKeyword,
-                SyntaxFactory.TriviaList(SyntaxFactory.ElasticMarker));
+            var constToken = SyntaxFactory.Token(leadingTrivia, SyntaxKind.ConstKeyword, SyntaxFactory.TriviaList(SyntaxFactory.ElasticMarker));
 
             // 修飾子リストにconstトークンを挿入し、変更後の修飾子リストを作成する
             var newModifiers = trimmedLocal.Modifiers.Insert(0, constToken);
@@ -88,20 +102,17 @@ namespace DiagnosticAndCodeFix
 
             // ローカル変数の宣言を作成する
             var newLocal = trimmedLocal.WithModifiers(newModifiers)
-                                        .WithDeclaration(variableDeclaration);
+                                       .WithDeclaration(variableDeclaration);
 
             // 整形用のアノテーションを付与する
-            var formattedLocal = 
-                newLocal.WithAdditionalAnnotations(Formatter.Annotation);
+            var formattedLocal = newLocal.WithAdditionalAnnotations(Formatter.Annotation);
 
             // 古い宣言文を新しいものに置き換える
-            var oldRoot = await document.GetSyntaxRootAsync(cancellationToken);
-            var newRoot = oldRoot.ReplaceNode(localDeclaration, formattedLocal);
+            var root = await document.GetSyntaxRootAsync(cancellationToken);
+            var newRoot = root.ReplaceNode(localDeclaration, formattedLocal);
 
             // 変更後の木を返す
             return document.WithSyntaxRoot(newRoot);
         }
-
-
     }
 }
